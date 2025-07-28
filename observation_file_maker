@@ -1,0 +1,108 @@
+import cv2
+import numpy as np
+import pickle
+import pyrealsense2 as rs
+import time
+from wlkata_mirobot import WlkataMirobot
+
+# === Initialize Mirobot ===
+arm = WlkataMirobot()
+arm.home()
+time.sleep(3)
+
+
+
+#### testing
+# 1) Print a summary
+#print(arm.pose)  
+
+# 2) List all attributes/methods
+#print(dir(arm.pose))  
+
+
+# === Initialize RealSense Camera ===
+ctx = rs.context()
+if len(ctx.devices) == 0:
+    raise RuntimeError("❌ No RealSense device connected.")
+print("✅ RealSense connected:", ctx.devices[0].get_info(rs.camera_info.name))
+
+pipeline = rs.pipeline()
+config = rs.config()
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+pipeline.start(config)
+
+# === Setup for Recording ===
+language_command = input("Enter instruction (e.g., 'pick up the block'): ")
+episodes = []
+save_path = "mirobot_data.pkl"
+
+print("📸 Starting data recording...")
+
+def pose_to_array(pose):
+    # Convert MirobotCartesians to numpy array [x, y, z, roll, pitch, yaw]
+    return np.array([
+        pose.x,
+        pose.y,
+        pose.z,
+        pose.roll,
+        pose.pitch,
+        pose.yaw
+    ], dtype=np.float32)
+
+try:
+    while True:
+        episode = {
+            "image": [],
+            "text": [],
+            "proprio": [],
+            "action": []
+        }
+
+        print("\n👉 Move Mirobot manually between positions.")
+        input("Press Enter to begin recording this episode...")
+
+        prev_pose = pose_to_array(arm.pose)
+        step = 0
+
+        while True:
+            cmd = input(f"\n➡️ Press Enter to record step {step+1}, or type 'q' to finish episode: ")
+            if cmd.lower() == 'q':
+                break
+
+            curr_pose = pose_to_array(arm.pose)
+            delta = curr_pose - prev_pose
+
+            # Get RealSense RGB frame
+            frames = pipeline.wait_for_frames()
+            color_frame = frames.get_color_frame()
+            if not color_frame:
+                print("❌ Camera error — skipping this step")
+                continue
+
+            frame = np.asanyarray(color_frame.get_data())
+            img = cv2.resize(frame, (224, 224)) / 255.0
+            img = img.astype(np.float32)
+
+            # Store this step
+            episode["image"].append(img)
+            episode["proprio"].append(prev_pose)
+            episode["action"].append(delta)
+            episode["text"].append(language_command)
+
+            prev_pose = curr_pose  # update for next delta
+            step += 1
+            print(f"✅ Recorded step {step}")
+
+        # End of this episode
+        episodes.append(episode)
+        print(f"🎉 Finished episode with {step} steps. Total episodes: {len(episodes)}")
+
+        cont = input("Record another episode? (y/n): ")
+        if cont.lower() != 'y':
+            break
+
+finally:
+    pipeline.stop()
+    with open(save_path, "wb") as f:
+        pickle.dump(episodes, f)
+    print(f"💾 Saved dataset to {save_path}")
