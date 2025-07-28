@@ -1,0 +1,27 @@
+import time
+from wlkata_mirobot import WlkataMirobot
+
+# Create the robot arm
+arm = WlkataMirobot()
+# Return to the mechanical zero point (Homing, synchronous mode)
+arm.home()
+
+#arm.go_to_axis(150, -20, 230, 20, 30, -20, 0)
+print("Moving to target point A")
+arm.set_tool_pose(200, 20, 230)
+print(f"Current end-effector pose in robot coordinate frame: {arm.pose}")
+
+time.sleep(1)
+
+print("Moving to target point B")
+arm.set_tool_pose(200, 20, 150)
+print(f"Current end-effector pose in robot coordinate frame: {arm.pose}")
+
+time.sleep(1)
+
+print("Moving to target point C, specifying end-effector orientation angles")
+arm.set_tool_pose(150, -20, 230, roll=30.0, pitch=0, yaw=45.0)
+print(f"Current end-effector pose in robot coordinate frame: {arm.pose}")
+arm.pump_suction()
+time.sleep(3)
+arm.pump_off()
