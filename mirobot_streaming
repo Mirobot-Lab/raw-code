@@ -1,0 +1,109 @@
+import cv2
+import numpy as np
+import time
+import pyrealsense2 as rs
+from wlkata_mirobot import WlkataMirobot
+from experiments.robot.libero.run_libero_eval import GenerateConfig
+from experiments.robot.openvla_utils import (
+    get_vla_action, get_vla, get_processor,
+    get_action_head, get_proprio_projector
+)
+from prismatic.vla.constants import NUM_ACTIONS_CHUNK, PROPRIO_DIM
+
+## the code is getting the observation in real time and give the action chunk in real time
+
+# === Step 1: Configure model ===
+cfg = GenerateConfig(
+    pretrained_checkpoint="moojink/openvla-7b-oft-finetuned-libero-spatial",
+    use_l1_regression=True,
+    use_diffusion=False,
+    use_film=False,
+    num_images_in_input=2,
+    use_proprio=True,
+    load_in_8bit=False,
+    load_in_4bit=False,
+    center_crop=True,
+    num_open_loop_steps=NUM_ACTIONS_CHUNK,
+    unnorm_key="libero_spatial_no_noops"
+)
+
+# === Step 2: Load model and components ===
+vla = get_vla(cfg)
+processor = get_processor(cfg)
+action_head = get_action_head(cfg, llm_dim=vla.llm_dim)
+proprio_projector = get_proprio_projector(cfg, llm_dim=vla.llm_dim, proprio_dim=PROPRIO_DIM)
+
+# === Step 3: Start RealSense camera ===
+pipeline = rs.pipeline()
+config = rs.config()
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+pipeline.start(config)
+
+# === Step 4: Initialize Mirobot ===
+arm = WlkataMirobot()
+arm.home()
+time.sleep(2)
+
+# === Step 5: Helper to get current pose ===
+def get_mirobot_pose():
+    pose = arm.pose
+    return np.array([
+        pose["x"], pose["y"], pose["z"],
+        pose["roll"], pose["pitch"], pose["yaw"]
+    ], dtype=np.float32)
+
+# === Step 6: Inference ===
+try:
+    print("🔁 Capturing frame from RealSense...")
+    frames = pipeline.wait_for_frames()
+    color_frame = frames.get_color_frame()
+    depth_frame = frames.get_depth_frame()
+    if not color_frame or not depth_frame:
+        raise RuntimeError("❌ Could not read RealSense frame")
+
+    # Convert to numpy arrays
+    color_img = np.asanyarray(color_frame.get_data())           # (480, 640, 3)
+    depth_img = np.asanyarray(depth_frame.get_data())           # (480, 640)
+
+    # Resize and normalize
+    color_img = cv2.resize(color_img, (224, 224)).astype(np.uint8)
+    depth_img = cv2.resize(depth_img, (224, 224))
+
+    # Simulate wrist image as RGB depth
+    wrist_image = cv2.cvtColor(depth_img, cv2.COLOR_GRAY2RGB)
+
+    # Get proprio state
+    proprio = get_mirobot_pose()
+    if len(proprio) < PROPRIO_DIM:
+        proprio = np.pad(proprio, (0, PROPRIO_DIM - len(proprio)))
+
+    # Build observation dict
+    observation = {
+        "full_image": color_img,
+        "wrist_image": wrist_image,
+        "state": proprio,
+        "task_description": "move to the red block"
+    }
+
+    # Run inference
+    print("🎯 Running OpenVLA inference...")
+    actions = get_vla_action(cfg, vla, processor, observation,
+                             observation["task_description"], action_head, proprio_projector)
+
+    print("🔧 Action chunk:")
+    for i, act in enumerate(actions):
+        print(f"  Step {i+1}: {act}")
+
+    # Apply first action
+    act = actions[0][:6]
+    scale = np.array([0.01, 0.01, 0.01, 1, 1, 1])
+    target_pose = get_mirobot_pose() + act * scale
+    x, y, z, roll, pitch, yaw = target_pose
+
+    print(f"🤖 Executing pose: {target_pose}")
+    arm.set_tool_pose(x, y, z, roll=roll, pitch=pitch, yaw=yaw)
+
+finally:
+    pipeline.stop()
+    print("🛑 Done. Camera stopped.")
